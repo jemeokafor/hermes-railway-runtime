@@ -33,5 +33,5 @@ test("bootstrap starts Ollama and the Hermes gateway", () => {
 test("configuration writes Hermes state and preserves legacy migration inputs", () => {
   assert.match(configureScript, /HERMES_HOME/);
   assert.match(configureScript, /config\.yaml/);
-  assert.match(configureScript, /\/data\/\.clawdbot\/openclaw\.json/);
+  assert.match(configureScript, /LEGACY_CONFIG_PATH/);
 });
