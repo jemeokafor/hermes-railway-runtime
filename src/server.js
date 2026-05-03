@@ -43,6 +43,10 @@ const WORKSPACE_DIR =
 // Protect /setup with a user-provided password.
 const SETUP_PASSWORD = process.env.SETUP_PASSWORD?.trim();
 
+const STARTUP_VOLUME_BACKUP = /^(1|true|yes)$/i.test(process.env.OPENCLAW_CREATE_VOLUME_BACKUP ?? "");
+const STARTUP_VOLUME_BACKUP_LABEL = process.env.OPENCLAW_VOLUME_BACKUP_LABEL?.trim();
+const STARTUP_VOLUME_BACKUP_DIR = process.env.OPENCLAW_VOLUME_BACKUP_DIR?.trim() || "/data/backups";
+
 // Gateway admin token (protects OpenClaw gateway + Control UI).
 // Must be stable across restarts. If not provided via env, persist it in the state dir.
 function resolveGatewayToken() {
@@ -74,6 +78,7 @@ process.env.OPENCLAW_GATEWAY_TOKEN = OPENCLAW_GATEWAY_TOKEN;
 const INTERNAL_GATEWAY_PORT = Number.parseInt(process.env.INTERNAL_GATEWAY_PORT ?? "18789", 10);
 const INTERNAL_GATEWAY_HOST = process.env.INTERNAL_GATEWAY_HOST ?? "127.0.0.1";
 const GATEWAY_TARGET = `http://${INTERNAL_GATEWAY_HOST}:${INTERNAL_GATEWAY_PORT}`;
+const GATEWAY_READY_TIMEOUT_MS = Number.parseInt(process.env.OPENCLAW_GATEWAY_READY_TIMEOUT_MS ?? "120000", 10);
 
 // Always run the built-from-source CLI entry directly to avoid PATH/global-install mismatches.
 const OPENCLAW_ENTRY = process.env.OPENCLAW_ENTRY?.trim() || "/openclaw/dist/entry.js";
@@ -136,6 +141,9 @@ function isConfigured() {
 
 let gatewayProc = null;
 let gatewayStarting = null;
+let gatewayRecoveryTimer = null;
+let gatewayRecoveryDelayMs = 5_000;
+let gatewayStopRequested = false;
 
 // Debug breadcrumbs for common Railway failures (502 / "Application failed to respond").
 let lastGatewayError = null;
@@ -147,22 +155,49 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function clearGatewayRecoveryTimer() {
+  if (!gatewayRecoveryTimer) return;
+  clearTimeout(gatewayRecoveryTimer);
+  gatewayRecoveryTimer = null;
+}
+
+function resetGatewayRecoveryBackoff() {
+  gatewayRecoveryDelayMs = 5_000;
+  clearGatewayRecoveryTimer();
+}
+
+function scheduleGatewayRecovery(reason) {
+  if (!isConfigured() || gatewayStopRequested) return;
+  if (gatewayProc || gatewayStarting || gatewayRecoveryTimer) return;
+
+  const delayMs = gatewayRecoveryDelayMs;
+  gatewayRecoveryDelayMs = Math.min(gatewayRecoveryDelayMs * 2, 60_000);
+  console.warn(`[gateway] scheduling recovery in ${delayMs}ms (${reason})`);
+
+  gatewayRecoveryTimer = setTimeout(async () => {
+    gatewayRecoveryTimer = null;
+
+    if (!isConfigured() || gatewayStopRequested || gatewayProc || gatewayStarting) return;
+
+    try {
+      await ensureGatewayRunning();
+      resetGatewayRecoveryBackoff();
+      console.log("[gateway] recovery succeeded");
+    } catch (err) {
+      console.error(`[gateway] recovery failed: ${String(err)}`);
+      scheduleGatewayRecovery("retry");
+    }
+  }, delayMs);
+
+  gatewayRecoveryTimer.unref?.();
+}
+
 async function waitForGatewayReady(opts = {}) {
-  const timeoutMs = opts.timeoutMs ?? 20_000;
+  const timeoutMs = opts.timeoutMs ?? GATEWAY_READY_TIMEOUT_MS;
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
-      // Try the default Control UI base path, then fall back to root.
-      const paths = ["/openclaw", "/"];
-      for (const p of paths) {
-        try {
-          const res = await fetch(`${GATEWAY_TARGET}${p}`, { method: "GET" });
-          // Any HTTP response means the port is open.
-          if (res) return true;
-        } catch {
-          // try next
-        }
-      }
+      if (await probeGateway()) return true;
     } catch {
       // not ready
     }
@@ -174,6 +209,8 @@ async function waitForGatewayReady(opts = {}) {
 async function startGateway() {
   if (gatewayProc) return;
   if (!isConfigured()) throw new Error("Gateway cannot start: not configured");
+
+  gatewayStopRequested = false;
 
   fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
@@ -205,6 +242,7 @@ async function startGateway() {
     console.error(msg);
     lastGatewayError = msg;
     gatewayProc = null;
+    scheduleGatewayRecovery("spawn error");
   });
 
   gatewayProc.on("exit", (code, signal) => {
@@ -212,6 +250,9 @@ async function startGateway() {
     console.error(msg);
     lastGatewayExit = { code, signal, at: new Date().toISOString() };
     gatewayProc = null;
+    if (!gatewayStopRequested) {
+      scheduleGatewayRecovery(`process exit code=${code} signal=${signal}`);
+    }
   });
 }
 
@@ -238,15 +279,19 @@ async function ensureGatewayRunning() {
       try {
         lastGatewayError = null;
         await startGateway();
-        const ready = await waitForGatewayReady({ timeoutMs: 20_000 });
+        const ready = await waitForGatewayReady();
         if (!ready) {
           throw new Error("Gateway did not become ready in time");
         }
+        lastGatewayError = null;
+        lastGatewayExit = null;
+        resetGatewayRecoveryBackoff();
       } catch (err) {
         const msg = `[gateway] start failure: ${String(err)}`;
         lastGatewayError = msg;
         // Collect extra diagnostics to help users file issues.
         await runDoctorBestEffort();
+        scheduleGatewayRecovery("start failure");
         throw err;
       }
     })().finally(() => {
@@ -258,6 +303,9 @@ async function ensureGatewayRunning() {
 }
 
 async function restartGateway() {
+  clearGatewayRecoveryTimer();
+  gatewayStopRequested = true;
+
   if (gatewayProc) {
     try {
       gatewayProc.kill("SIGTERM");
@@ -268,6 +316,8 @@ async function restartGateway() {
     await sleep(750);
     gatewayProc = null;
   }
+
+  gatewayStopRequested = false;
   return ensureGatewayRunning();
 }
 
@@ -328,8 +378,9 @@ async function probeGateway() {
 // Public health endpoint (no auth) so Railway can probe without /setup.
 // Keep this free of secrets.
 app.get("/healthz", async (_req, res) => {
+  const configured = isConfigured();
   let gatewayReachable = false;
-  if (isConfigured()) {
+  if (configured) {
     try {
       gatewayReachable = await probeGateway();
     } catch {
@@ -337,10 +388,15 @@ app.get("/healthz", async (_req, res) => {
     }
   }
 
-  res.json({
-    ok: true,
+  const ok = !configured || gatewayReachable;
+  if (configured && !gatewayReachable) {
+    scheduleGatewayRecovery("health probe");
+  }
+
+  res.status(ok ? 200 : 503).json({
+    ok,
     wrapper: {
-      configured: isConfigured(),
+      configured,
       stateDir: STATE_DIR,
       workspaceDir: WORKSPACE_DIR,
     },
@@ -701,6 +757,50 @@ function runCmd(cmd, args, opts = {}) {
       resolve({ code: code ?? 0, output: out });
     });
   });
+}
+
+function sanitizeBackupLabel(label) {
+  const cleaned = String(label || "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return cleaned || "startup-backup";
+}
+
+async function createVolumeBackupIfRequested() {
+  if (!STARTUP_VOLUME_BACKUP) return;
+
+  const dataRoot = "/data";
+  if (!isUnderDir(STATE_DIR, dataRoot) || !isUnderDir(WORKSPACE_DIR, dataRoot)) {
+    console.warn("[backup] skipped: state/workspace are not both under /data");
+    return;
+  }
+
+  fs.mkdirSync(STARTUP_VOLUME_BACKUP_DIR, { recursive: true });
+
+  const label = sanitizeBackupLabel(
+    STARTUP_VOLUME_BACKUP_LABEL || `startup-${new Date().toISOString().replace(/[:.]/g, "-")}`,
+  );
+  const backupPath = path.join(STARTUP_VOLUME_BACKUP_DIR, `${label}.tar.gz`);
+  if (fs.existsSync(backupPath)) {
+    console.log(`[backup] existing snapshot found: ${backupPath}`);
+    return;
+  }
+
+  const relPaths = Array.from(new Set([
+    path.relative(dataRoot, path.resolve(STATE_DIR)),
+    path.relative(dataRoot, path.resolve(WORKSPACE_DIR)),
+  ].filter(Boolean)));
+
+  console.log(`[backup] creating persistent snapshot: ${backupPath}`);
+  const result = await runCmd("tar", ["-C", dataRoot, "-czf", backupPath, ...relPaths], {
+    timeoutMs: 30 * 60 * 1000,
+  });
+
+  if (result.code !== 0) {
+    throw new Error(`backup failed (${result.code}): ${result.output}`);
+  }
+
+  console.log(`[backup] persistent snapshot ready: ${backupPath}`);
 }
 
 app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
@@ -1410,6 +1510,14 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
     console.warn("[wrapper] WARNING: SETUP_PASSWORD is not set; /setup will error.");
   }
 
+  try {
+    await createVolumeBackupIfRequested();
+  } catch (err) {
+    console.error(`[backup] startup snapshot failed: ${String(err)}`);
+    process.exit(1);
+    return;
+  }
+
   // Optional operator hook to install/persist extra tools under /data.
   // This is intentionally best-effort and should be used to set up persistent
   // prefixes (npm/pnpm/python venv), not to mutate the base image.
@@ -1479,6 +1587,9 @@ server.on("upgrade", async (req, socket, head) => {
 });
 
 process.on("SIGTERM", () => {
+  gatewayStopRequested = true;
+  clearGatewayRecoveryTimer();
+
   // Best-effort shutdown
   try {
     if (gatewayProc) gatewayProc.kill("SIGTERM");
