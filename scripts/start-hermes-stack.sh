@@ -68,7 +68,7 @@ if ! ollama list | grep -q 'gemma4:e4b'; then
 fi
 
 if [ ! -f "${MIGRATION_MARKER}" ]; then
-  log "running OpenClaw migration into Hermes"
+  log "running legacy state migration into Hermes"
   hermes claw migrate \
     --source /data/.clawdbot \
     --workspace-target /data/workspace \

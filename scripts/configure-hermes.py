@@ -11,8 +11,8 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME", "/data/.hermes"))
 CONFIG_PATH = HERMES_HOME / "config.yaml"
 ENV_PATH = HERMES_HOME / ".env"
 SKILL_PATH = HERMES_HOME / "skills" / "cortex-kb" / "SKILL.md"
-OPENCLAW_CONFIG_PATH = Path("/data/.clawdbot/openclaw.json")
-TELEGRAM_ALLOWLIST_PATH = Path("/data/.clawdbot/credentials/telegram-default-allowFrom.json")
+LEGACY_CONFIG_PATH = Path("/data/.clawdbot/openclaw.json")
+LEGACY_TELEGRAM_ALLOWLIST_PATH = Path("/data/.clawdbot/credentials/telegram-default-allowFrom.json")
 
 CORTEX_URL = os.environ.get(
     "HERMES_BOOTSTRAP_CORTEX_URL",
@@ -78,13 +78,13 @@ def load_env(path: Path) -> tuple[list[str], dict[str, str]]:
     values: dict[str, str] = {}
 
     if path.exists():
-      for raw_line in path.read_text().splitlines():
-        lines.append(raw_line)
-        stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in raw_line:
-            continue
-        key, value = raw_line.split("=", 1)
-        values[key] = value
+        for raw_line in path.read_text().splitlines():
+            lines.append(raw_line)
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in raw_line:
+                continue
+            key, value = raw_line.split("=", 1)
+            values[key] = value
 
     return lines, values
 
@@ -114,14 +114,14 @@ def save_env(path: Path, lines: list[str], updates: dict[str, str]) -> None:
     path.write_text("\n".join(rendered).strip() + "\n")
 
 
-def load_openclaw_config() -> dict:
-    if not OPENCLAW_CONFIG_PATH.exists():
+def load_legacy_config() -> dict:
+    if not LEGACY_CONFIG_PATH.exists():
         return {}
-    return json.loads(OPENCLAW_CONFIG_PATH.read_text())
+    return json.loads(LEGACY_CONFIG_PATH.read_text())
 
 
 def extract_telegram_source() -> tuple[str | None, list[str]]:
-    config = load_openclaw_config()
+    config = load_legacy_config()
     token = (
         config.get("channels", {})
         .get("telegram", {})
@@ -129,8 +129,8 @@ def extract_telegram_source() -> tuple[str | None, list[str]]:
     )
 
     allow_from: list[str] = []
-    if TELEGRAM_ALLOWLIST_PATH.exists():
-        data = json.loads(TELEGRAM_ALLOWLIST_PATH.read_text())
+    if LEGACY_TELEGRAM_ALLOWLIST_PATH.exists():
+        data = json.loads(LEGACY_TELEGRAM_ALLOWLIST_PATH.read_text())
         raw_users = data.get("allowFrom", [])
         if isinstance(raw_users, list):
             allow_from = [str(item) for item in raw_users if str(item).strip()]

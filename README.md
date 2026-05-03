@@ -1,6 +1,6 @@
 # Hermes Railway Runtime
 
-This repository packages **Hermes Agent** for Railway as the runtime behind `Ulysses_Openclaw_Bot`.
+This repository packages **Hermes Agent** for Railway.
 
 It builds Hermes directly from `NousResearch/hermes-agent`, runs a small Node wrapper on Railway's injected `PORT`, starts Ollama and the Hermes gateway inside the container, and exposes `/healthz` for Railway healthchecks.
 
