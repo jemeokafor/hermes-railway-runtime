@@ -4,15 +4,32 @@ import fs from "node:fs";
 import express from "express";
 
 const PORT = Number.parseInt(process.env.PORT ?? "3000", 10);
+const HERMES_HOME = process.env.HERMES_HOME ?? "/data/.hermes";
 const READY_FILE = process.env.HERMES_READY_FILE ?? "/tmp/hermes-ready";
 const GATEWAY_PID_FILE = process.env.HERMES_GATEWAY_PID_FILE ?? "/tmp/hermes-gateway.pid";
 const OLLAMA_PID_FILE = process.env.HERMES_OLLAMA_PID_FILE ?? "/tmp/ollama.pid";
 const START_SCRIPT = process.env.HERMES_START_SCRIPT ?? "/app/scripts/start-hermes-stack.sh";
+const GATEWAY_STATE_FILE = process.env.HERMES_GATEWAY_STATE_FILE ?? `${HERMES_HOME}/gateway_state.json`;
+const GATEWAY_LOG_FILE = process.env.HERMES_GATEWAY_LOG_FILE ?? `${HERMES_HOME}/logs/gateway.log`;
+const HEALTH_REQUIRE_TELEGRAM = !["0", "false", "no"].includes(
+  (process.env.HERMES_HEALTH_REQUIRE_TELEGRAM ?? "true").toLowerCase(),
+);
+const SELF_HEAL_INTERVAL_MS = Number.parseInt(process.env.HERMES_SELF_HEAL_INTERVAL_MS ?? "30000", 10);
+const SELF_HEAL_AFTER_MS = Number.parseInt(process.env.HERMES_SELF_HEAL_AFTER_MS ?? "120000", 10);
+const LOG_TAIL_BYTES = Number.parseInt(process.env.HERMES_HEALTH_LOG_TAIL_BYTES ?? "262144", 10);
 
 let stackProc = null;
 let restarting = false;
 let shuttingDown = false;
 let lastExit = null;
+let lastSelfHeal = null;
+let unhealthySince = null;
+
+const AUTH_FAILURE_PATTERNS = [
+  /Codex refresh token was already consumed/i,
+  /no Codex OAuth token found/i,
+  /Primary provider auth failed/i,
+];
 
 function readPid(file) {
   try {
@@ -42,6 +59,127 @@ function clearReady() {
   } catch {
     // ignore
   }
+}
+
+function readJson(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function readTail(file, maxBytes) {
+  try {
+    const stat = fs.statSync(file);
+    const start = Math.max(0, stat.size - maxBytes);
+    const length = stat.size - start;
+    const buffer = Buffer.alloc(length);
+    const fd = fs.openSync(file, "r");
+    try {
+      fs.readSync(fd, buffer, 0, length, start);
+    } finally {
+      fs.closeSync(fd);
+    }
+    return buffer.toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
+function lastLogMatch(patterns) {
+  const text = readTail(GATEWAY_LOG_FILE, LOG_TAIL_BYTES);
+  if (!text) return null;
+
+  const lines = text.split("\n");
+  const lastStartupIndex = Math.max(
+    lines.findLastIndex((line) => line.includes("Connected to Telegram")),
+    lines.findLastIndex((line) => line.includes("Gateway running")),
+  );
+
+  for (let index = lines.length - 1; index > lastStartupIndex; index -= 1) {
+    const line = lines[index];
+    if (patterns.some((pattern) => pattern.test(line))) {
+      return {
+        line: line.slice(0, 500),
+        sinceLastStartup: lastStartupIndex >= 0,
+      };
+    }
+  }
+
+  return null;
+}
+
+function platformIssue(gatewayStatus) {
+  if (!HEALTH_REQUIRE_TELEGRAM) return null;
+
+  const telegram = gatewayStatus?.platforms?.telegram;
+  if (!telegram) {
+    return "telegram_status_missing";
+  }
+
+  if (telegram.state !== "connected") {
+    return `telegram_${telegram.state ?? "unknown"}`;
+  }
+
+  return null;
+}
+
+function currentHealth() {
+  const ready = fs.existsSync(READY_FILE);
+  const gatewayAlive = pidAlive(GATEWAY_PID_FILE);
+  const ollamaAlive = pidAlive(OLLAMA_PID_FILE);
+  const gatewayStatus = readJson(GATEWAY_STATE_FILE);
+  const gatewayState = gatewayStatus?.gateway_state ?? null;
+  const telegram = gatewayStatus?.platforms?.telegram ?? null;
+  const issues = [];
+  const restartableIssues = [];
+  const codexAuthFailure = lastLogMatch(AUTH_FAILURE_PATTERNS);
+
+  if (!ready) issues.push("not_ready");
+  if (!gatewayAlive) issues.push("gateway_process_dead");
+  if (!ollamaAlive) issues.push("ollama_process_dead");
+  if (!stackProc) issues.push("stack_process_missing");
+
+  const platformProblem = platformIssue(gatewayStatus);
+  if (platformProblem) {
+    issues.push(platformProblem);
+    restartableIssues.push(platformProblem);
+  }
+
+  if (codexAuthFailure) {
+    issues.push("codex_auth_failure");
+  }
+
+  const ok = Boolean(
+    ready
+      && gatewayAlive
+      && ollamaAlive
+      && stackProc
+      && !platformProblem,
+  );
+
+  return {
+    ok,
+    ready,
+    gatewayAlive,
+    ollamaAlive,
+    stackPid: stackProc?.pid ?? null,
+    gatewayState,
+    telegram: telegram
+      ? {
+          state: telegram.state ?? null,
+          errorCode: telegram.error_code ?? null,
+          errorMessage: telegram.error_message ?? null,
+          updatedAt: telegram.updated_at ?? null,
+        }
+      : null,
+    codexAuthFailure,
+    issues,
+    restartableIssues,
+    lastExit,
+    lastSelfHeal,
+  };
 }
 
 function launchStack() {
@@ -92,41 +230,63 @@ function launchStack() {
   });
 }
 
+function restartStack(reason) {
+  if (!stackProc || restarting || shuttingDown) return;
+
+  lastSelfHeal = {
+    reason,
+    at: new Date().toISOString(),
+  };
+  console.error(`[wrapper] self-healing Hermes stack reason=${reason}`);
+  clearReady();
+
+  try {
+    stackProc.kill("SIGTERM");
+  } catch (err) {
+    console.error(`[wrapper] failed to stop Hermes stack for self-heal: ${err}`);
+  }
+}
+
+function checkSelfHeal() {
+  if (shuttingDown || restarting) return;
+
+  const health = currentHealth();
+  const reason = health.restartableIssues[0];
+  if (!health.ready || !health.gatewayAlive || !health.ollamaAlive || !reason) {
+    unhealthySince = null;
+    return;
+  }
+
+  const now = Date.now();
+  unhealthySince ??= now;
+  if (now - unhealthySince >= SELF_HEAL_AFTER_MS) {
+    unhealthySince = null;
+    restartStack(reason);
+  }
+}
+
 const app = express();
 app.disable("x-powered-by");
 
 app.get("/healthz", (_req, res) => {
-  const ready = fs.existsSync(READY_FILE);
-  const gatewayAlive = pidAlive(GATEWAY_PID_FILE);
-  const ollamaAlive = pidAlive(OLLAMA_PID_FILE);
-  const ok = Boolean(ready && gatewayAlive && ollamaAlive && stackProc);
+  const health = currentHealth();
 
-  res.status(ok ? 200 : 503).json({
-    ok,
-    ready,
-    gatewayAlive,
-    ollamaAlive,
-    stackPid: stackProc?.pid ?? null,
-    lastExit,
-  });
+  res.status(health.ok ? 200 : 503).json(health);
 });
 
 app.get("/", (_req, res) => {
-  const ready = fs.existsSync(READY_FILE);
-
   res.json({
     service: "hermes-railway-runtime",
-    ready,
-    gatewayAlive: pidAlive(GATEWAY_PID_FILE),
-    ollamaAlive: pidAlive(OLLAMA_PID_FILE),
-    stackPid: stackProc?.pid ?? null,
-    lastExit,
+    ...currentHealth(),
   });
 });
 
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`[wrapper] listening on :${PORT}`);
   launchStack();
+  if (Number.isFinite(SELF_HEAL_INTERVAL_MS) && SELF_HEAL_INTERVAL_MS > 0) {
+    setInterval(checkSelfHeal, SELF_HEAL_INTERVAL_MS).unref?.();
+  }
 });
 
 process.on("SIGTERM", () => {

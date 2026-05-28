@@ -2,7 +2,7 @@
 
 This repository packages **Hermes Agent** for Railway.
 
-It builds Hermes directly from `NousResearch/hermes-agent`, runs a small Node wrapper on Railway's injected `PORT`, starts Ollama and the Hermes gateway inside the container, and exposes `/healthz` for Railway healthchecks.
+It builds Hermes directly from a pinned `NousResearch/hermes-agent` ref, runs a small Node wrapper on Railway's injected `PORT`, starts Ollama and the Hermes gateway inside the container, and exposes `/healthz` for Railway healthchecks.
 
 ## Runtime Shape
 
@@ -46,8 +46,23 @@ docker run --rm -p 8080:8080 \
 curl -fsS http://127.0.0.1:8080/healthz
 ```
 
+## Upgrading Hermes
+
+Hermes is pinned in `Dockerfile` with `ARG HERMES_GIT_REF=<commit-or-tag>`. Do not switch this back to tracking `main` directly; explicit refs keep Railway builds reproducible and make rollback straightforward.
+
+To upgrade when NousResearch publishes a newer Hermes version:
+
+1. Pick the new upstream tag or commit from `NousResearch/hermes-agent`.
+2. Update `ARG HERMES_GIT_REF` in `Dockerfile`.
+3. Run `npm run lint` and `npm test`.
+4. Commit and push to `main`.
+5. Let Railway deploy, then verify `https://hermes-railway-runtime-production.up.railway.app/healthz`.
+6. Roll back by reverting the ref bump commit or redeploying the previous successful Railway deployment.
+
 ## Operational Notes
 
-- The Dockerfile patches Hermes defensively only when the upstream `RedactingFormatter` class is absent.
+- The current pinned Hermes ref is recorded in the image at `/opt/hermes-agent.commit`.
+- The Dockerfile patches Hermes defensively only when the upstream `RedactingFormatter` class/import is absent.
 - The patch locates the `from typing import ...` line dynamically so upstream import-list changes do not break Railway builds.
-- The Railway service was verified healthy after deployment `af95e1f5-2ed8-4bba-8fdc-ed5926975e0a`.
+- The Dockerfile also patches Hermes' Codex Responses streaming path to recover when the OpenAI SDK `responses.stream` helper crashes on a terminal SSE frame with `response.output = null`.
+- Telegram gateway dependencies are installed at image build time so Railway startup does not depend on Hermes lazy installs.
