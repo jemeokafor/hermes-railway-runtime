@@ -11,6 +11,9 @@ const OLLAMA_PID_FILE = process.env.HERMES_OLLAMA_PID_FILE ?? "/tmp/ollama.pid";
 const START_SCRIPT = process.env.HERMES_START_SCRIPT ?? "/app/scripts/start-hermes-stack.sh";
 const GATEWAY_STATE_FILE = process.env.HERMES_GATEWAY_STATE_FILE ?? `${HERMES_HOME}/gateway_state.json`;
 const GATEWAY_LOG_FILE = process.env.HERMES_GATEWAY_LOG_FILE ?? `${HERMES_HOME}/logs/gateway.log`;
+const STACK_STATE_FILE = process.env.HERMES_STACK_STATE_FILE ?? `${HERMES_HOME}/stack_state.json`;
+const PLANNED_STOP_DIAG_FILE = process.env.HERMES_PLANNED_STOP_DIAG_FILE
+  ?? `${HERMES_HOME}/logs/planned-stop-markers.jsonl`;
 const HEALTH_REQUIRE_TELEGRAM = !["0", "false", "no"].includes(
   (process.env.HERMES_HEALTH_REQUIRE_TELEGRAM ?? "true").toLowerCase(),
 );
@@ -67,6 +70,90 @@ function readJson(file) {
   } catch {
     return null;
   }
+}
+
+function readLastJsonLine(file) {
+  const text = readTail(file, 65536);
+  if (!text) return null;
+
+  const lines = text.split("\n").filter(Boolean);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      return JSON.parse(lines[index]);
+    } catch {
+      // keep scanning older lines
+    }
+  }
+
+  return null;
+}
+
+function safeNumber(value) {
+  return Number.isFinite(value) ? value : null;
+}
+
+function sanitizeStackState(stackState) {
+  if (!stackState || typeof stackState !== "object") return null;
+
+  const resources = stackState.resources && typeof stackState.resources === "object"
+    ? stackState.resources
+    : {};
+  const memoryEvents = resources.memoryEvents && typeof resources.memoryEvents === "object"
+    ? resources.memoryEvents
+    : {};
+  const logBytes = stackState.logBytes && typeof stackState.logBytes === "object"
+    ? stackState.logBytes
+    : {};
+  const lastChildExit = stackState.lastChildExit && typeof stackState.lastChildExit === "object"
+    ? stackState.lastChildExit
+    : null;
+
+  return {
+    event: stackState.event ?? null,
+    action: stackState.action ?? null,
+    updatedAt: stackState.updatedAt ?? null,
+    lastChildExit: lastChildExit
+      ? {
+          child: lastChildExit.child ?? null,
+          pid: safeNumber(lastChildExit.pid),
+          status: safeNumber(lastChildExit.status),
+          signal: lastChildExit.signal ?? null,
+          at: lastChildExit.at ?? null,
+        }
+      : null,
+    resources: {
+      memoryCurrentMb: safeNumber(resources.memoryCurrentMb),
+      memoryMaxMb: safeNumber(resources.memoryMaxMb),
+      pidsCurrent: safeNumber(resources.pidsCurrent),
+      pidsMax: safeNumber(resources.pidsMax),
+      load1: safeNumber(resources.load1),
+      load5: safeNumber(resources.load5),
+      load15: safeNumber(resources.load15),
+      dataUsedPct: safeNumber(resources.dataUsedPct),
+      oomKillCount: safeNumber(memoryEvents.oom_kill),
+      oomCount: safeNumber(memoryEvents.oom),
+    },
+    logBytes: {
+      bootstrap: safeNumber(logBytes.bootstrap),
+      gateway: safeNumber(logBytes.gateway),
+      ollama: safeNumber(logBytes.ollama),
+    },
+  };
+}
+
+function sanitizePlannedStopDiag(diag) {
+  if (!diag || typeof diag !== "object") return null;
+
+  const marker = diag.marker && typeof diag.marker === "object" ? diag.marker : {};
+  return {
+    observedAt: diag.observed_at ?? null,
+    matched: typeof diag.matched === "boolean" ? diag.matched : null,
+    reason: diag.reason ?? null,
+    targetPid: safeNumber(marker.target_pid),
+    stopperPid: safeNumber(marker.stopper_pid),
+    stopperPpid: safeNumber(marker.stopper_ppid),
+    writtenAt: marker.written_at ?? null,
+  };
 }
 
 function readTail(file, maxBytes) {
@@ -130,6 +217,8 @@ function currentHealth() {
   const gatewayAlive = pidAlive(GATEWAY_PID_FILE);
   const ollamaAlive = pidAlive(OLLAMA_PID_FILE);
   const gatewayStatus = readJson(GATEWAY_STATE_FILE);
+  const stackState = sanitizeStackState(readJson(STACK_STATE_FILE));
+  const plannedStop = sanitizePlannedStopDiag(readLastJsonLine(PLANNED_STOP_DIAG_FILE));
   const gatewayState = gatewayStatus?.gateway_state ?? null;
   const telegram = gatewayStatus?.platforms?.telegram ?? null;
   const issues = [];
@@ -179,6 +268,9 @@ function currentHealth() {
     restartableIssues,
     lastExit,
     lastSelfHeal,
+    stack: stackState,
+    lastChildExit: stackState?.lastChildExit ?? null,
+    lastPlannedStop: plannedStop,
   };
 }
 

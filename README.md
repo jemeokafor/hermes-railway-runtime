@@ -64,5 +64,8 @@ To upgrade when NousResearch publishes a newer Hermes version:
 - The current pinned Hermes ref is recorded in the image at `/opt/hermes-agent.commit`.
 - The Dockerfile patches Hermes defensively only when the upstream `RedactingFormatter` class/import is absent.
 - The patch locates the `from typing import ...` line dynamically so upstream import-list changes do not break Railway builds.
-- The Dockerfile also patches Hermes' Codex Responses streaming path to recover when the OpenAI SDK `responses.stream` helper crashes on a terminal SSE frame with `response.output = null`.
+- The Dockerfile also patches Hermes' Codex Responses streaming paths to recover when the OpenAI SDK `responses.stream` helper crashes on a terminal SSE frame with `response.output = null`.
+- The auxiliary Codex adapter is patched to use `responses.create(stream=True)` so memory/search summarizers avoid the same SDK parser crash.
+- Planned gateway-stop markers are preserved in `/data/.hermes/logs/planned-stop-markers.jsonl` before Hermes consumes them, so future shutdowns retain their stopper PID/source evidence.
+- The Railway wrapper writes safe stack diagnostics to `/data/.hermes/stack_state.json` and restarts Ollama in place when only the local delegation substrate exits.
 - Telegram gateway dependencies are installed at image build time so Railway startup does not depend on Hermes lazy installs.

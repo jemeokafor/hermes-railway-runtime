@@ -40,10 +40,30 @@ test("wrapper self-heals restartable platform failures", () => {
   assert.match(serverSrc, /setInterval\(checkSelfHeal, SELF_HEAL_INTERVAL_MS\)/);
 });
 
+test("health exposes sanitized stack diagnostics", () => {
+  assert.match(serverSrc, /const STACK_STATE_FILE/);
+  assert.match(serverSrc, /sanitizeStackState/);
+  assert.match(serverSrc, /lastChildExit: stackState\?\.lastChildExit/);
+  assert.match(serverSrc, /oomKillCount/);
+  assert.match(serverSrc, /sanitizePlannedStopDiag/);
+  assert.doesNotMatch(serverSrc, /stopper_cmdline/);
+  assert.doesNotMatch(serverSrc, /stopper_parent_cmdline/);
+});
+
 test("bootstrap starts Ollama and the Hermes gateway", () => {
   assert.match(startScript, /ollama serve/);
   assert.match(startScript, /python -m gateway\.run/);
   assert.match(startScript, /touch "\$\{HERMES_READY_FILE\}"/);
+});
+
+test("bootstrap classifies child exits and decouples Ollama restart", () => {
+  assert.match(startScript, /STACK_STATE_FILE/);
+  assert.match(startScript, /function write_stack_state|write_stack_state\(\)/);
+  assert.match(startScript, /wait -n -p exited_pid/);
+  assert.match(startScript, /restart_ollama/);
+  assert.match(startScript, /without stopping gateway/);
+  assert.match(startScript, /lastChildExit/);
+  assert.match(startScript, /rotate_logs/);
 });
 
 test("configuration writes Hermes state and preserves legacy migration inputs", () => {
@@ -70,4 +90,18 @@ test("Dockerfile patches Codex SDK terminal stream parsing", () => {
   assert.match(dockerfile, /Codex terminal SSE frame can omit response\.output/);
   assert.match(dockerfile, /responses\.stream helper/);
   assert.match(dockerfile, /_run_codex_create_stream_fallback/);
+});
+
+test("Dockerfile preserves planned-stop marker source diagnostics", () => {
+  assert.match(dockerfile, /Railway planned-stop marker source diagnostics/);
+  assert.match(dockerfile, /planned-stop-markers\.jsonl/);
+  assert.match(dockerfile, /_append_planned_stop_marker_diag/);
+  assert.match(dockerfile, /stopper_cmdline/);
+  assert.match(dockerfile, /stopper_parent_cmdline/);
+});
+
+test("Dockerfile patches auxiliary Codex streaming", () => {
+  assert.match(dockerfile, /Codex auxiliary avoids responses\.stream parser/);
+  assert.match(dockerfile, /responses\.create\(\*\*_stream_kwargs\)/);
+  assert.match(dockerfile, /terminal_response or SimpleNamespace\(output=\[\]\)/);
 });
