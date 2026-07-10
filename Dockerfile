@@ -57,7 +57,10 @@ from pathlib import Path
 
 path = Path('/opt/hermes-agent/run_agent.py')
 text = path.read_text()
-if 'Codex terminal SSE frame can omit response.output' not in text:
+if (
+    'Codex terminal SSE frame can omit response.output' not in text
+    and 'from agent.codex_runtime import run_codex_stream' not in text
+):
     marker = '''            except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:\n'''
     if marker not in text:
         raise SystemExit('Failed to locate Codex stream exception marker')
@@ -196,7 +199,10 @@ from pathlib import Path
 
 path = Path('/opt/hermes-agent/agent/auxiliary_client.py')
 text = path.read_text()
-if 'Codex auxiliary avoids responses.stream parser for null terminal output' not in text:
+if (
+    'Codex auxiliary avoids responses.stream parser for null terminal output' not in text
+    and 'from agent.codex_runtime import _consume_codex_event_stream' not in text
+):
     old = '''            with self._client.responses.stream(**resp_kwargs) as stream:
                 for _event in stream:
                     _check_cancelled()

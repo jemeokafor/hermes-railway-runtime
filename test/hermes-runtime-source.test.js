@@ -103,6 +103,7 @@ test("Dockerfile patches Codex SDK terminal stream parsing", () => {
   assert.match(dockerfile, /Codex terminal SSE frame can omit response\.output/);
   assert.match(dockerfile, /responses\.stream helper/);
   assert.match(dockerfile, /_run_codex_create_stream_fallback/);
+  assert.match(dockerfile, /from agent\.codex_runtime import run_codex_stream/);
 });
 
 test("Dockerfile preserves planned-stop marker source diagnostics", () => {
@@ -117,4 +118,5 @@ test("Dockerfile patches auxiliary Codex streaming", () => {
   assert.match(dockerfile, /Codex auxiliary avoids responses\.stream parser/);
   assert.match(dockerfile, /responses\.create\(\*\*_stream_kwargs\)/);
   assert.match(dockerfile, /terminal_response or SimpleNamespace\(output=\[\]\)/);
+  assert.match(dockerfile, /from agent\.codex_runtime import _consume_codex_event_stream/);
 });
