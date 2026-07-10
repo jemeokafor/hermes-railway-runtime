@@ -73,9 +73,22 @@ test("configuration writes Hermes state and preserves legacy migration inputs", 
 });
 
 test("Dockerfile pins Hermes to an explicit upstream ref", () => {
-  assert.match(dockerfile, /ARG HERMES_GIT_REF=a91a57fa5a13d516c38b07a141a9ce8a3daabeb0/);
+  assert.match(dockerfile, /ARG HERMES_GIT_REF=2bd1977d8fad185c9b4be47884f7e87f1add0ce3/);
   assert.match(dockerfile, /git fetch --depth 1 origin "\$\{HERMES_GIT_REF\}"/);
   assert.doesNotMatch(dockerfile, /git clone --depth 1 --branch main/);
+});
+
+test("Dockerfile applies the Telegram RetryAfter delivery patch", () => {
+  const retryPatch = fs.readFileSync(
+    new URL("../scripts/patch-hermes-telegram-retry.py", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(dockerfile, /COPY scripts\/patch-hermes-telegram-retry\.py/);
+  assert.match(dockerfile, /python3 \/tmp\/patch-hermes-telegram-retry\.py/);
+  assert.match(retryPatch, /retry_after_seconds/);
+  assert.match(retryPatch, /server_delay/);
+  assert.match(retryPatch, /sendRichMessage transient failure/);
 });
 
 test("Dockerfile keeps Telegram available without runtime lazy installs", () => {

@@ -1,6 +1,6 @@
 FROM node:22-bookworm
 
-ARG HERMES_GIT_REF=a91a57fa5a13d516c38b07a141a9ce8a3daabeb0
+ARG HERMES_GIT_REF=2bd1977d8fad185c9b4be47884f7e87f1add0ce3
 
 ENV NODE_ENV=production
 ENV PATH="/root/.local/bin:${PATH}"
@@ -30,6 +30,9 @@ RUN git init hermes-agent \
   && git fetch --depth 1 origin "${HERMES_GIT_REF}" \
   && git checkout --detach FETCH_HEAD \
   && git rev-parse HEAD > /opt/hermes-agent.commit
+COPY scripts/patch-hermes-telegram-retry.py /tmp/patch-hermes-telegram-retry.py
+RUN python3 /tmp/patch-hermes-telegram-retry.py --root /opt/hermes-agent \
+  && rm /tmp/patch-hermes-telegram-retry.py
 RUN python3 - <<'PY'
 from pathlib import Path
 
