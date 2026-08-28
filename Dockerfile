@@ -21,6 +21,15 @@ LABEL org.opencontainers.image.revision="${RAILWAY_GIT_COMMIT_SHA}"
 ENV NODE_ENV=production
 ENV PATH="/root/.local/bin:${PATH}"
 ENV MEDIA_EVIDENCE_WHISPER_MODEL_PATH="/opt/media-models/base.en"
+ENV SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
+ENV REQUESTS_CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+ENV CURL_CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+ENV GIT_SSL_CAINFO="/etc/ssl/certs/ca-certificates.crt"
+ENV NODE_EXTRA_CA_CERTS="/etc/ssl/certs/ca-certificates.crt"
+ENV NPM_CONFIG_CAFILE="/etc/ssl/certs/ca-certificates.crt"
+ENV UV_NATIVE_TLS=true
+ENV UV_HTTP_TIMEOUT=300
+ENV UV_HTTP_RETRIES=10
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
