@@ -1,25 +1,46 @@
 import childProcess from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import express from "express";
 
 const PORT = Number.parseInt(process.env.PORT ?? "3000", 10);
-const HERMES_HOME = process.env.HERMES_HOME ?? "/data/.hermes";
-const READY_FILE = process.env.HERMES_READY_FILE ?? "/tmp/hermes-ready";
-const GATEWAY_PID_FILE = process.env.HERMES_GATEWAY_PID_FILE ?? "/tmp/hermes-gateway.pid";
-const OLLAMA_PID_FILE = process.env.HERMES_OLLAMA_PID_FILE ?? "/tmp/ollama.pid";
+const HERMES_HOME = "/data/.hermes";
+const SUPERVISOR_DATA_DIR = "/data/.hermes-supervisor";
+const SUPERVISOR_RUN_DIR = "/run/hermes-supervisor";
+const ROOT_UID = 0;
+const GATEWAY_UID = 23102;
+const READY_FILE = `${SUPERVISOR_RUN_DIR}/ready`;
+const GATEWAY_PID_FILE = `${SUPERVISOR_RUN_DIR}/gateway.pid`;
+const OLLAMA_PID_FILE = `${SUPERVISOR_RUN_DIR}/ollama.pid`;
+const BROKER_PID_FILE = `${SUPERVISOR_RUN_DIR}/media-evidence-broker.pid`;
 const START_SCRIPT = process.env.HERMES_START_SCRIPT ?? "/app/scripts/start-hermes-stack.sh";
-const GATEWAY_STATE_FILE = process.env.HERMES_GATEWAY_STATE_FILE ?? `${HERMES_HOME}/gateway_state.json`;
-const GATEWAY_LOG_FILE = process.env.HERMES_GATEWAY_LOG_FILE ?? `${HERMES_HOME}/logs/gateway.log`;
-const STACK_STATE_FILE = process.env.HERMES_STACK_STATE_FILE ?? `${HERMES_HOME}/stack_state.json`;
-const PLANNED_STOP_DIAG_FILE = process.env.HERMES_PLANNED_STOP_DIAG_FILE
-  ?? `${HERMES_HOME}/logs/planned-stop-markers.jsonl`;
+const GATEWAY_STATE_FILE = `${HERMES_HOME}/gateway_state.json`;
+const GATEWAY_LOG_FILE = `${SUPERVISOR_DATA_DIR}/logs/gateway-stdio.log`;
+const STACK_STATE_FILE = `${SUPERVISOR_DATA_DIR}/stack_state.json`;
+const PLANNED_STOP_DIAG_FILE = `${HERMES_HOME}/logs/planned-stop-markers.jsonl`;
+const MEDIA_EVIDENCE_READINESS_FILE = `${SUPERVISOR_RUN_DIR}/media-evidence-readiness.json`;
 const HEALTH_REQUIRE_TELEGRAM = !["0", "false", "no"].includes(
   (process.env.HERMES_HEALTH_REQUIRE_TELEGRAM ?? "true").toLowerCase(),
 );
+const HEALTH_REQUIRE_MEDIA_EVIDENCE = ["1", "true", "yes", "on"].includes(
+  (process.env.MEDIA_EVIDENCE_REQUIRE_READY ?? "false").toLowerCase(),
+);
+const MEDIA_EVIDENCE_READINESS_MAX_AGE_MS = Number.parseInt(
+  process.env.MEDIA_EVIDENCE_READINESS_MAX_AGE_MS ?? "28800000",
+  10,
+);
 const SELF_HEAL_INTERVAL_MS = Number.parseInt(process.env.HERMES_SELF_HEAL_INTERVAL_MS ?? "30000", 10);
 const SELF_HEAL_AFTER_MS = Number.parseInt(process.env.HERMES_SELF_HEAL_AFTER_MS ?? "120000", 10);
-const LOG_TAIL_BYTES = Number.parseInt(process.env.HERMES_HEALTH_LOG_TAIL_BYTES ?? "262144", 10);
+const requestedLogTailBytes = Number.parseInt(process.env.HERMES_HEALTH_LOG_TAIL_BYTES ?? "262144", 10);
+const LOG_TAIL_BYTES = Number.isSafeInteger(requestedLogTailBytes)
+  && requestedLogTailBytes > 0
+  && requestedLogTailBytes <= 1024 * 1024
+  ? requestedLogTailBytes
+  : 262144;
+const MAX_CONTROL_FILE_BYTES = 1024 * 1024;
+const MAX_DIAGNOSTIC_FILE_BYTES = 128 * 1024 * 1024;
 
 let stackProc = null;
 let restarting = false;
@@ -34,14 +55,68 @@ const AUTH_FAILURE_PATTERNS = [
   /Primary provider auth failed/i,
 ];
 
-function readPid(file) {
+export function secureRead(file, { ownerUid, maxBytes, tailBytes = null }) {
+  let descriptor;
   try {
-    const value = fs.readFileSync(file, "utf8").trim();
-    const pid = Number.parseInt(value, 10);
-    return Number.isFinite(pid) ? pid : null;
+    descriptor = fs.openSync(
+      file,
+      fs.constants.O_RDONLY | fs.constants.O_CLOEXEC | fs.constants.O_NOFOLLOW,
+    );
+    const before = fs.fstatSync(descriptor);
+    if (
+      !before.isFile()
+      || before.uid !== ownerUid
+      || before.nlink !== 1
+      || !Number.isSafeInteger(before.size)
+      || before.size < 0
+      || before.size > maxBytes
+    ) {
+      return null;
+    }
+
+    const requestedTail = tailBytes === null ? before.size : Math.min(before.size, tailBytes);
+    const start = before.size - requestedTail;
+    const buffer = Buffer.alloc(requestedTail);
+    let offset = 0;
+    while (offset < requestedTail) {
+      const bytesRead = fs.readSync(
+        descriptor,
+        buffer,
+        offset,
+        requestedTail - offset,
+        start + offset,
+      );
+      if (bytesRead === 0) return null;
+      offset += bytesRead;
+    }
+
+    const after = fs.fstatSync(descriptor);
+    if (
+      !after.isFile()
+      || after.uid !== ownerUid
+      || after.nlink !== 1
+      || after.dev !== before.dev
+      || after.ino !== before.ino
+      || after.size < before.size
+      || (tailBytes === null && after.size !== before.size)
+    ) {
+      return null;
+    }
+    return buffer;
   } catch {
     return null;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
   }
+}
+
+function readPid(file) {
+  const content = secureRead(file, { ownerUid: ROOT_UID, maxBytes: 64 });
+  if (!content) return null;
+  const value = content.toString("utf8").trim();
+  if (!/^[1-9][0-9]{0,9}$/.test(value)) return null;
+  const pid = Number.parseInt(value, 10);
+  return Number.isSafeInteger(pid) ? pid : null;
 }
 
 function pidAlive(file) {
@@ -64,16 +139,17 @@ function clearReady() {
   }
 }
 
-function readJson(file) {
+function readJson(file, ownerUid, maxBytes = MAX_CONTROL_FILE_BYTES) {
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
+    const content = secureRead(file, { ownerUid, maxBytes });
+    return content ? JSON.parse(content.toString("utf8")) : null;
   } catch {
     return null;
   }
 }
 
-function readLastJsonLine(file) {
-  const text = readTail(file, 65536);
+function readLastJsonLine(file, ownerUid) {
+  const text = readTail(file, 65536, ownerUid);
   if (!text) return null;
 
   const lines = text.split("\n").filter(Boolean);
@@ -137,6 +213,7 @@ function sanitizeStackState(stackState) {
       bootstrap: safeNumber(logBytes.bootstrap),
       gateway: safeNumber(logBytes.gateway),
       ollama: safeNumber(logBytes.ollama),
+      broker: safeNumber(logBytes.broker),
     },
   };
 }
@@ -156,26 +233,17 @@ function sanitizePlannedStopDiag(diag) {
   };
 }
 
-function readTail(file, maxBytes) {
-  try {
-    const stat = fs.statSync(file);
-    const start = Math.max(0, stat.size - maxBytes);
-    const length = stat.size - start;
-    const buffer = Buffer.alloc(length);
-    const fd = fs.openSync(file, "r");
-    try {
-      fs.readSync(fd, buffer, 0, length, start);
-    } finally {
-      fs.closeSync(fd);
-    }
-    return buffer.toString("utf8");
-  } catch {
-    return "";
-  }
+function readTail(file, maxBytes, ownerUid) {
+  const content = secureRead(file, {
+    ownerUid,
+    maxBytes: MAX_DIAGNOSTIC_FILE_BYTES,
+    tailBytes: maxBytes,
+  });
+  return content?.toString("utf8") ?? "";
 }
 
 function lastLogMatch(patterns) {
-  const text = readTail(GATEWAY_LOG_FILE, LOG_TAIL_BYTES);
+  const text = readTail(GATEWAY_LOG_FILE, LOG_TAIL_BYTES, ROOT_UID);
   if (!text) return null;
 
   const lines = text.split("\n");
@@ -212,22 +280,44 @@ function platformIssue(gatewayStatus) {
   return null;
 }
 
+function mediaEvidenceReadiness() {
+  if (!HEALTH_REQUIRE_MEDIA_EVIDENCE) return { issue: null, record: null };
+  const record = readJson(MEDIA_EVIDENCE_READINESS_FILE, ROOT_UID);
+  if (!record || typeof record !== "object") {
+    return { issue: "media_evidence_readiness_missing", record: null };
+  }
+  if (record.ok !== true) {
+    return { issue: "media_evidence_readiness_failed", record };
+  }
+  const checkedAt = Number(record.checked_at_epoch) * 1000;
+  const age = Date.now() - checkedAt;
+  if (!Number.isFinite(checkedAt) || age < -300000 || age > MEDIA_EVIDENCE_READINESS_MAX_AGE_MS) {
+    return { issue: "media_evidence_readiness_stale", record };
+  }
+  return { issue: null, record };
+}
+
 function currentHealth() {
-  const ready = fs.existsSync(READY_FILE);
+  const ready = secureRead(READY_FILE, { ownerUid: ROOT_UID, maxBytes: 64 }) !== null;
   const gatewayAlive = pidAlive(GATEWAY_PID_FILE);
   const ollamaAlive = pidAlive(OLLAMA_PID_FILE);
-  const gatewayStatus = readJson(GATEWAY_STATE_FILE);
-  const stackState = sanitizeStackState(readJson(STACK_STATE_FILE));
-  const plannedStop = sanitizePlannedStopDiag(readLastJsonLine(PLANNED_STOP_DIAG_FILE));
+  const brokerAlive = pidAlive(BROKER_PID_FILE);
+  const gatewayStatus = readJson(GATEWAY_STATE_FILE, GATEWAY_UID);
+  const stackState = sanitizeStackState(readJson(STACK_STATE_FILE, ROOT_UID));
+  const plannedStop = sanitizePlannedStopDiag(
+    readLastJsonLine(PLANNED_STOP_DIAG_FILE, GATEWAY_UID),
+  );
   const gatewayState = gatewayStatus?.gateway_state ?? null;
   const telegram = gatewayStatus?.platforms?.telegram ?? null;
   const issues = [];
   const restartableIssues = [];
   const codexAuthFailure = lastLogMatch(AUTH_FAILURE_PATTERNS);
+  const mediaEvidence = mediaEvidenceReadiness();
 
   if (!ready) issues.push("not_ready");
   if (!gatewayAlive) issues.push("gateway_process_dead");
   if (!ollamaAlive) issues.push("ollama_process_dead");
+  if (!brokerAlive) issues.push("media_evidence_broker_process_dead");
   if (!stackProc) issues.push("stack_process_missing");
 
   const platformProblem = platformIssue(gatewayStatus);
@@ -239,13 +329,19 @@ function currentHealth() {
   if (codexAuthFailure) {
     issues.push("codex_auth_failure");
   }
+  if (mediaEvidence.issue) {
+    issues.push(mediaEvidence.issue);
+    restartableIssues.push(mediaEvidence.issue);
+  }
 
   const ok = Boolean(
     ready
       && gatewayAlive
       && ollamaAlive
+      && brokerAlive
       && stackProc
-      && !platformProblem,
+      && !platformProblem
+      && !mediaEvidence.issue,
   );
 
   return {
@@ -253,6 +349,7 @@ function currentHealth() {
     ready,
     gatewayAlive,
     ollamaAlive,
+    brokerAlive,
     stackPid: stackProc?.pid ?? null,
     gatewayState,
     telegram: telegram
@@ -264,6 +361,18 @@ function currentHealth() {
         }
       : null,
     codexAuthFailure,
+    mediaEvidence: mediaEvidence.record
+      ? {
+          ok: mediaEvidence.record.ok === true,
+          checkedAtEpoch: safeNumber(Number(mediaEvidence.record.checked_at_epoch)),
+          canaryJobId: typeof mediaEvidence.record.canary_job_id === "string"
+            ? mediaEvidence.record.canary_job_id
+            : null,
+          failures: Array.isArray(mediaEvidence.record.failures)
+            ? mediaEvidence.record.failures.slice(0, 20).map((value) => String(value).slice(0, 160))
+            : [],
+        }
+      : null,
     issues,
     restartableIssues,
     lastExit,
@@ -344,7 +453,13 @@ function checkSelfHeal() {
 
   const health = currentHealth();
   const reason = health.restartableIssues[0];
-  if (!health.ready || !health.gatewayAlive || !health.ollamaAlive || !reason) {
+  if (
+    !health.ready
+    || !health.gatewayAlive
+    || !health.ollamaAlive
+    || !health.brokerAlive
+    || !reason
+  ) {
     unhealthySince = null;
     return;
   }
@@ -373,24 +488,33 @@ app.get("/", (_req, res) => {
   });
 });
 
-const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log(`[wrapper] listening on :${PORT}`);
-  launchStack();
-  if (Number.isFinite(SELF_HEAL_INTERVAL_MS) && SELF_HEAL_INTERVAL_MS > 0) {
-    setInterval(checkSelfHeal, SELF_HEAL_INTERVAL_MS).unref?.();
+function startHttpServer() {
+  if (typeof process.getuid !== "function" || process.getuid() !== ROOT_UID) {
+    throw new Error("Hermes supervisor must run as root");
   }
-});
+  const server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`[wrapper] listening on :${PORT}`);
+    launchStack();
+    if (Number.isFinite(SELF_HEAL_INTERVAL_MS) && SELF_HEAL_INTERVAL_MS > 0) {
+      setInterval(checkSelfHeal, SELF_HEAL_INTERVAL_MS).unref?.();
+    }
+  });
 
-process.on("SIGTERM", () => {
-  shuttingDown = true;
-  clearReady();
+  process.on("SIGTERM", () => {
+    shuttingDown = true;
+    clearReady();
 
-  try {
-    stackProc?.kill("SIGTERM");
-  } catch {
-    // ignore
-  }
+    try {
+      stackProc?.kill("SIGTERM");
+    } catch {
+      // ignore
+    }
 
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 5000).unref?.();
-});
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5000).unref?.();
+  });
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  startHttpServer();
+}

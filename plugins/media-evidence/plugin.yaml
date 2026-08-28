@@ -1,0 +1,10 @@
+manifest_version: 1
+name: media-evidence
+version: 1.0.0
+kind: standalone
+description: Sandboxed, deterministic evidence extraction for image, PDF, audio, and video
+provides_tools:
+  - media_evidence_analyze
+  - media_evidence_capabilities
+  - media_evidence_status
+  - media_evidence_validate_claims

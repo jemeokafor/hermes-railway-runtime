@@ -1,27 +1,87 @@
-FROM node:22-bookworm
+FROM node:22-bookworm@sha256:0557ac14e0d45d02ed563067b82856ca5e7aa3437fa28d98d4350ea9c3d9494a
 
 ARG HERMES_GIT_REF=2bd1977d8fad185c9b4be47884f7e87f1add0ce3
+ARG MEDIA_WORKER_UID=23100
+ARG MEDIA_WORKER_GID=23100
+ARG MEDIA_ACQUISITION_UID=23101
+ARG MEDIA_ACQUISITION_GID=23101
+ARG WHISPER_MODEL_REVISION=3d3d5dee26484f91867d81cb899cfcf72b96be6c
+ARG WHISPER_MODEL_SHA256=2a166925539a16005f14ff328359f9b9adb9dc4fb631bb3b227526862e93e2ef
+ARG RAILWAY_GIT_COMMIT_SHA=unknown
+ARG TARGETARCH=amd64
+ARG UV_VERSION=0.12.5
+ARG UV_AMD64_SHA256=68a509da24b06b4223a1c0175fb5eb5bc79342b76cbeff0cfe51ac3f5b17b6b2
+ARG UV_ARM64_SHA256=9bf43b4d1a07665bf64d4c4e710930b382321a785e0eb10aac07f46471f86a31
+ARG OLLAMA_VERSION=v0.32.15
+ARG OLLAMA_AMD64_SHA256=50539c5fe9bf85887733355098dcdb266b433cb8c73fa180713417e9ed6e42bb
+ARG OLLAMA_ARM64_SHA256=c898270b1690eab0f51aa9e9197686b7b4c6a7d88b83967763818f3127e477e9
+
+LABEL org.opencontainers.image.revision="${RAILWAY_GIT_COMMIT_SHA}"
 
 ENV NODE_ENV=production
 ENV PATH="/root/.local/bin:${PATH}"
+ENV MEDIA_EVIDENCE_WHISPER_MODEL_PATH="/opt/media-models/base.en"
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
+    clamav \
+    clamav-freshclam \
     curl \
+    espeak-ng \
     ffmpeg \
+    file \
+    fonts-dejavu-core \
     git \
     libffi-dev \
+    libimage-exiftool-perl \
+    libseccomp2 \
+    poppler-utils \
     python3 \
     python3-dev \
     python3-venv \
+    qpdf \
     ripgrep \
+    tesseract-ocr \
+    tesseract-ocr-eng \
     tini \
+    util-linux \
     zstd \
   && rm -rf /var/lib/apt/lists/*
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+RUN freshclam --stdout \
+  && test -n "$(find /var/lib/clamav -maxdepth 1 -type f \( -name 'daily.cvd' -o -name 'daily.cld' \) -size +0c -print -quit)"
+
+RUN groupadd --system --gid "${MEDIA_WORKER_GID}" hermes-media \
+  && useradd --system --uid "${MEDIA_WORKER_UID}" --gid hermes-media --no-create-home \
+    --home-dir /nonexistent --shell /usr/sbin/nologin hermes-media \
+  && groupadd --system --gid "${MEDIA_ACQUISITION_GID}" hermes-acquire \
+  && useradd --system --uid "${MEDIA_ACQUISITION_UID}" --gid hermes-acquire --no-create-home \
+    --home-dir /nonexistent --shell /usr/sbin/nologin hermes-acquire \
+  && groupadd --system --gid 23102 hermes-gateway \
+  && useradd --system --uid 23102 --gid hermes-gateway --no-create-home \
+    --home-dir /data/.hermes-home --shell /usr/sbin/nologin hermes-gateway \
+  && groupadd --system --gid 23103 hermes-evidence
+
+RUN install -d -o root -g root -m 0755 /data
+
+RUN case "${TARGETARCH}" in \
+      amd64) UV_TARGET="x86_64-unknown-linux-gnu"; UV_SHA256="${UV_AMD64_SHA256}" ;; \
+      arm64) UV_TARGET="aarch64-unknown-linux-gnu"; UV_SHA256="${UV_ARM64_SHA256}" ;; \
+      *) echo "Unsupported uv architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+  && UV_ARCHIVE="uv-${UV_TARGET}.tar.gz" \
+  && curl --fail --location --proto '=https' --tlsv1.2 \
+    --output "/tmp/${UV_ARCHIVE}" \
+    "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_ARCHIVE}" \
+  && printf '%s  %s\n' "${UV_SHA256}" "/tmp/${UV_ARCHIVE}" | sha256sum --check --strict - \
+  && mkdir /tmp/uv-release \
+  && tar -xzf "/tmp/${UV_ARCHIVE}" -C /tmp/uv-release \
+  && install -m 0755 "/tmp/uv-release/uv-${UV_TARGET}/uv" /usr/local/bin/uv \
+  && install -m 0755 "/tmp/uv-release/uv-${UV_TARGET}/uvx" /usr/local/bin/uvx \
+  && rm -rf "/tmp/${UV_ARCHIVE}" /tmp/uv-release \
+  && uv --version
 
 WORKDIR /opt
 RUN git init hermes-agent \
@@ -262,22 +322,149 @@ if (
     path.write_text(text.replace(old, new, 1))
 PY
 
+COPY media_evidence /opt/hermes-agent/media_evidence
+COPY plugins/media-evidence /opt/hermes-agent/plugins/media-evidence
+
+RUN python3 - <<'PY'
+from pathlib import Path
+
+path = Path('/opt/hermes-agent/pyproject.toml')
+text = path.read_text(encoding='utf-8')
+marker = '[tool.setuptools.packages.find]\ninclude = ['
+replacement = '[tool.setuptools.packages.find]\ninclude = ["media_evidence", "media_evidence.*", '
+if marker not in text:
+    raise SystemExit('Failed to locate Hermes package discovery configuration')
+path.write_text(text.replace(marker, replacement, 1), encoding='utf-8')
+PY
+
 WORKDIR /opt/hermes-agent
 RUN uv venv /opt/hermes-venv --python 3.11 \
-  && VIRTUAL_ENV=/opt/hermes-venv uv pip install -e ".[all]" "python-telegram-bot[webhooks]==22.6" \
-  && ln -sf /opt/hermes-venv/bin/hermes /usr/local/bin/hermes
+  && UV_PROJECT_ENVIRONMENT=/opt/hermes-venv uv sync \
+    --frozen \
+    --no-dev \
+    --extra all \
+    --extra messaging \
+    --extra voice \
+    --python /opt/hermes-venv/bin/python \
+  && ln -sf /opt/hermes-venv/bin/hermes /usr/local/bin/hermes \
+  && /opt/hermes-venv/bin/python -I -c "from media_evidence.broker import main as broker_main; from media_evidence.broker_client import BrokerClient; from media_evidence.contracts import validate_manifest_schema; from media_evidence.worker import main" \
+  && /opt/hermes-venv/bin/python -I -c "import faster_whisper, PIL, telegram"
 
-RUN curl -fsSL https://ollama.com/install.sh | sh
+RUN /opt/hermes-venv/bin/python -I - <<'PY'
+from importlib.metadata import version
+
+expected = {
+    "faster-whisper": "1.2.1",
+    "Pillow": "12.2.0",
+    "python-telegram-bot": "22.6",
+}
+observed = {name: version(name) for name in expected}
+if observed != expected:
+    raise SystemExit(f"Locked runtime dependency mismatch: {observed!r}")
+PY
+
+RUN WHISPER_MODEL_REVISION="${WHISPER_MODEL_REVISION}" \
+    WHISPER_MODEL_SHA256="${WHISPER_MODEL_SHA256}" \
+    /opt/hermes-venv/bin/python - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+
+from huggingface_hub import snapshot_download
+
+repository = "Systran/faster-whisper-base.en"
+revision = os.environ["WHISPER_MODEL_REVISION"]
+expected_model_sha256 = os.environ["WHISPER_MODEL_SHA256"]
+target = Path(os.environ["MEDIA_EVIDENCE_WHISPER_MODEL_PATH"])
+snapshot_download(
+    repo_id=repository,
+    revision=revision,
+    local_dir=target,
+    allow_patterns=["config.json", "model.bin", "tokenizer.json", "vocabulary.txt"],
+)
+model = target / "model.bin"
+actual_model_sha256 = hashlib.sha256(model.read_bytes()).hexdigest()
+if actual_model_sha256 != expected_model_sha256:
+    raise SystemExit("Pinned Whisper model hash mismatch")
+(target / "provenance.json").write_text(
+    json.dumps(
+        {
+            "repository": repository,
+            "revision": revision,
+            "model_sha256": actual_model_sha256,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+
+RUN chown -R root:root /opt/media-models \
+  && find /opt/media-models -type d -exec chmod 0555 {} + \
+  && find /opt/media-models -type f -exec chmod 0444 {} +
+
+RUN chown -R root:root /opt/hermes-agent/media_evidence /opt/hermes-agent/plugins/media-evidence \
+  && chmod -R a-w /opt/hermes-agent/media_evidence /opt/hermes-agent/plugins/media-evidence \
+  && find /opt/hermes-agent/media_evidence /opt/hermes-agent/plugins/media-evidence \
+    -type d -exec chmod 0555 {} + \
+  && find /opt/hermes-agent/media_evidence /opt/hermes-agent/plugins/media-evidence \
+    -type f -exec chmod 0444 {} +
+
+RUN case "${TARGETARCH}" in \
+      amd64) OLLAMA_ARCH="amd64"; OLLAMA_SHA256="${OLLAMA_AMD64_SHA256}" ;; \
+      arm64) OLLAMA_ARCH="arm64"; OLLAMA_SHA256="${OLLAMA_ARM64_SHA256}" ;; \
+      *) echo "Unsupported Ollama architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+  && OLLAMA_ARCHIVE="ollama-linux-${OLLAMA_ARCH}.tar.zst" \
+  && curl --fail --location --proto '=https' --tlsv1.2 \
+    --output "/tmp/${OLLAMA_ARCHIVE}" \
+    "https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/${OLLAMA_ARCHIVE}" \
+  && printf '%s  %s\n' "${OLLAMA_SHA256}" "/tmp/${OLLAMA_ARCHIVE}" | sha256sum --check --strict - \
+  && zstd --decompress --quiet --stdout "/tmp/${OLLAMA_ARCHIVE}" | tar -xf - -C /usr/local \
+  && rm "/tmp/${OLLAMA_ARCHIVE}" \
+  && test -x /usr/local/bin/ollama \
+  && ollama --version
 
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm install --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev && npm cache clean --force
 
 COPY src ./src
-COPY scripts ./scripts
+COPY scripts/configure-hermes.py \
+  scripts/generate_media_sbom.py \
+  scripts/hermes_smoke.py \
+  scripts/media-evidence-readiness.py \
+  scripts/ollama_probe.py \
+  scripts/openai_codex_oauth.py \
+  scripts/patch-hermes-telegram-retry.py \
+  scripts/remote-hermes-bootstrap.sh \
+  scripts/smoke.js \
+  scripts/start-hermes-stack.sh \
+  ./scripts/
 
-RUN chmod +x /app/scripts/start-hermes-stack.sh
+RUN /opt/hermes-venv/bin/python -I -c "import runpy; runpy.run_path('/app/scripts/media-evidence-readiness.py', run_name='media_evidence_readiness_smoke')"
+
+RUN case "${TARGETARCH}" in \
+      amd64) UV_SHA256="${UV_AMD64_SHA256}"; OLLAMA_SHA256="${OLLAMA_AMD64_SHA256}" ;; \
+      arm64) UV_SHA256="${UV_ARM64_SHA256}"; OLLAMA_SHA256="${OLLAMA_ARM64_SHA256}" ;; \
+      *) exit 1 ;; \
+    esac \
+  && /opt/hermes-venv/bin/python /app/scripts/generate_media_sbom.py \
+      --output /opt/hermes-runtime.cdx.json \
+      --package-lock /app/package-lock.json \
+      --application-version "${RAILWAY_GIT_COMMIT_SHA}" \
+      --model-provenance /opt/media-models/base.en/provenance.json \
+      --tool "uv|${UV_VERSION}|${UV_SHA256}|pkg:github/astral-sh/uv@${UV_VERSION}" \
+      --tool "ollama|${OLLAMA_VERSION}|${OLLAMA_SHA256}|pkg:github/ollama/ollama@${OLLAMA_VERSION#v}" \
+  && sha256sum /opt/hermes-runtime.cdx.json > /opt/hermes-runtime.cdx.sha256 \
+  && printf '%s\n' "${RAILWAY_GIT_COMMIT_SHA}" > /opt/hermes-source.commit \
+  && chmod 0444 /opt/hermes-runtime.cdx.json /opt/hermes-runtime.cdx.sha256 /opt/hermes-source.commit
+
+RUN chmod +x /app/scripts/start-hermes-stack.sh /app/scripts/media-evidence-readiness.py
 
 EXPOSE 8080
 

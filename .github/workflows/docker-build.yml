@@ -13,6 +13,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: P4 harness self-checks
+        env:
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/p4-pycache
+        run: |
+          python3 -m unittest discover -s test/p4 -p 'test_p4_harness.py'
+          python3 -m py_compile test/p4/p4_image_certification.py test/p4/test_p4_harness.py
+          bash -n scripts/certify-p4-image.sh
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -23,6 +31,26 @@ jobs:
           context: .
           file: ./Dockerfile
           push: false
+          load: true
           tags: hermes-railway-runtime:ci
+          build-args: |
+            RAILWAY_GIT_COMMIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Certify P4 candidate image
+        timeout-minutes: 30
+        env:
+          P4_REPORT_PATH: ${{ runner.temp }}/p4-image-certification.json
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          npm run certify:p4 -- hermes-railway-runtime:ci
+
+      - name: Upload P4 certification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p4-image-certification
+          path: ${{ runner.temp }}/p4-image-certification.json
+          if-no-files-found: error

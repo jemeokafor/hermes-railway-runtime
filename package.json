@@ -9,12 +9,12 @@
     "dev": "node src/hermes-server.js",
     "start": "node src/hermes-server.js",
     "lint": "node -c src/hermes-server.js",
-    "test": "node --test",
+    "test": "node --test && npm run test:media",
+    "test:media": "python3 -m unittest discover -s test/python -p 'test_*.py' && python3 -m unittest discover -s test/p4 -p 'test_*.py'",
+    "certify:p4": "bash scripts/certify-p4-image.sh",
     "smoke": "node scripts/smoke.js"
   },
   "dependencies": {
-    "express": "^5.1.0",
-    "http-proxy": "^1.18.1",
-    "tar": "^7.5.4"
+    "express": "^5.2.1"
   }
 }

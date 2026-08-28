@@ -1,3 +1,5 @@
+"$schema" = "https://railway.com/railway.schema.json"
+
 [build]
 builder = "DOCKERFILE"
 
@@ -8,8 +10,3 @@ restartPolicyType = "ON_FAILURE"
 
 # Require a persistent volume mounted at /data (Railway).
 requiredMountPath = "/data"
-
-[variables]
-# NOTE: Railway injects PORT automatically.
-# Do not set PORT here; Railway templates may not apply it reliably and hardcoding
-# can cause domain routing mismatches.
