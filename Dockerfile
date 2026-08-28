@@ -16,8 +16,6 @@ ARG OLLAMA_VERSION=v0.32.15
 ARG OLLAMA_AMD64_SHA256=50539c5fe9bf85887733355098dcdb266b433cb8c73fa180713417e9ed6e42bb
 ARG OLLAMA_ARM64_SHA256=c898270b1690eab0f51aa9e9197686b7b4c6a7d88b83967763818f3127e477e9
 
-LABEL org.opencontainers.image.revision="${RAILWAY_GIT_COMMIT_SHA}"
-
 ENV NODE_ENV=production
 ENV PATH="/root/.local/bin:${PATH}"
 ENV MEDIA_EVIDENCE_WHISPER_MODEL_PATH="/opt/media-models/base.en"
@@ -472,6 +470,8 @@ RUN case "${TARGETARCH}" in \
   && sha256sum /opt/hermes-runtime.cdx.json > /opt/hermes-runtime.cdx.sha256 \
   && printf '%s\n' "${RAILWAY_GIT_COMMIT_SHA}" > /opt/hermes-source.commit \
   && chmod 0444 /opt/hermes-runtime.cdx.json /opt/hermes-runtime.cdx.sha256 /opt/hermes-source.commit
+
+LABEL org.opencontainers.image.revision="${RAILWAY_GIT_COMMIT_SHA}"
 
 RUN chmod +x /app/scripts/start-hermes-stack.sh /app/scripts/media-evidence-readiness.py
 
