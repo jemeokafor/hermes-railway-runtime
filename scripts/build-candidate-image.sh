@@ -4,7 +4,8 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 candidate_image=${CANDIDATE_IMAGE:-hermes-railway-runtime:candidate}
 minimum_free_bytes=${DOCKER_MIN_FREE_BYTES:-7516192768}
-source_sha=${SOURCE_SHA:-$(git -C "${repo_root}" rev-parse HEAD)}
+head_sha=$(git -C "${repo_root}" rev-parse HEAD)
+source_sha=${SOURCE_SHA:-${head_sha}}
 
 die() {
   printf '%s\n' "$*" >&2
@@ -25,6 +26,7 @@ require_space() {
 }
 
 [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]] || die "SOURCE_SHA must be a 40-character lowercase Git SHA."
+[[ "${source_sha}" == "${head_sha}" ]] || die "SOURCE_SHA must match the checked-out Git revision."
 (( minimum_free_bytes >= 6000000000 )) || die "DOCKER_MIN_FREE_BYTES must retain at least 6 GB."
 git -C "${repo_root}" diff --quiet || die "Refusing Docker build from a dirty worktree."
 git -C "${repo_root}" diff --cached --quiet || die "Refusing Docker build from a dirty index."
