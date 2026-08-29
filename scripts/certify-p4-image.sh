@@ -62,7 +62,9 @@ if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ || "${source_commit}" == 0000000000
   exit 65
 fi
 
-temporary_output=$(mktemp -d)
+# Docker Desktop cannot bind-mount the host /tmp; keep this short-lived report
+# directory under the shared repository path instead.
+temporary_output=$(mktemp -d "${repo_root}/.p4-report.XXXXXX")
 cleanup() {
   rm -rf -- "${temporary_output}"
 }
