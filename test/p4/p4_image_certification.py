@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import copy
 import errno
+import fcntl
 import grp
 import hashlib
 import json
@@ -14,6 +15,7 @@ import re
 import socket
 import stat
 import subprocess
+import struct
 import sys
 import threading
 import wave
@@ -2443,6 +2445,43 @@ def validate_report_file(path: Path) -> dict[str, Any]:
     return report
 
 
+def assert_network_isolated() -> None:
+    interface_names = [name for _, name in socket.if_nameindex()]
+    require("lo" in interface_names, "container has no loopback network interface")
+
+    for name in interface_names:
+        if name == "lo":
+            continue
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            try:
+                fcntl.ioctl(probe.fileno(), 0x8915, struct.pack("256s", name.encode("ascii")))
+            except OSError as exc:
+                require(exc.errno in {errno.EADDRNOTAVAIL, errno.ENODEV}, "network interface address probe failed")
+            else:
+                raise CertificationFailure("container has a configured non-loopback IPv4 interface")
+
+    ipv6_interfaces = {
+        fields[-1]
+        for line in Path("/proc/net/if_inet6").read_text(encoding="ascii").splitlines()
+        if (fields := line.split())
+    }
+    require(ipv6_interfaces <= {"lo"}, "container has a configured non-loopback IPv6 interface")
+
+    ipv4_routes = [
+        fields
+        for line in Path("/proc/net/route").read_text(encoding="ascii").splitlines()[1:]
+        if (fields := line.split()) and fields[0] != "lo"
+    ]
+    require(not ipv4_routes, "container has a non-loopback IPv4 route")
+
+    ipv6_routes = [
+        fields
+        for line in Path("/proc/net/ipv6_route").read_text(encoding="ascii").splitlines()
+        if (fields := line.split()) and fields[-1] != "lo"
+    ]
+    require(not ipv6_routes, "container has a non-loopback IPv6 route")
+
+
 def certification_main(report_path: Path) -> int:
     image_id = os.getenv("P4_IMAGE_ID", "")
     image_reference = os.getenv("P4_IMAGE_REFERENCE", "")
@@ -2455,7 +2494,7 @@ def certification_main(report_path: Path) -> int:
     try:
         require(os.getenv("P4_NETWORK_MODE") == "none", "wrapper did not declare network=none")
         require(not os.getenv("RAILWAY_DEPLOYMENT_ID"), "deployment identity must be empty during certification")
-        require([name for _, name in socket.if_nameindex()] == ["lo"], "container has a non-loopback network interface")
+        assert_network_isolated()
         assert_write_denied(Path("/p4/.p4-write-probe"))
         assert_write_denied(Path("/.p4-image-write-probe"))
         candidate, embedded = verify_candidate(image_id, image_reference, source_commit)
