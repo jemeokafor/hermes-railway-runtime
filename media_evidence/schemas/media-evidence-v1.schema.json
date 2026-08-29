@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermes.local/schemas/media-evidence-v1.schema.json",
+  "title": "Hermes Media Evidence Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "job",
+    "source",
+    "acquisition",
+    "execution",
+    "artifacts",
+    "evidence",
+    "quality",
+    "policy",
+    "integrity"
+  ],
+  "properties": {
+    "schema": {"const": "media-evidence/v1"},
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "idempotency_key", "state", "trace_id", "created_at", "completed_at"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^mev_[0-9a-f]{24}$"},
+        "idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "state": {"const": "completed"},
+        "trace_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "completed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "bytes",
+        "actual_mime",
+        "media_kind",
+        "name_sha256",
+        "declared_suffix",
+        "rights_basis",
+        "privacy"
+      ],
+      "properties": {
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "bytes": {"type": "integer", "minimum": 1},
+        "actual_mime": {"type": "string", "minLength": 1},
+        "media_kind": {"enum": ["audio", "document", "image", "video"]},
+        "name_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "declared_suffix": {"type": "string", "maxLength": 32},
+        "rights_basis": {
+          "enum": ["user_provided", "licensed", "public_domain", "fair_use", "other_documented"]
+        },
+        "privacy": {"enum": ["private", "sensitive", "internal", "public"]}
+      }
+    },
+    "acquisition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter", "retrieved_at", "redirects", "network_used", "source_uri_sha256", "final_uri_sha256"],
+      "properties": {
+        "adapter": {"enum": ["local", "https"]},
+        "retrieved_at": {"type": "string", "format": "date-time"},
+        "redirects": {"type": "integer", "minimum": 0, "maximum": 3},
+        "network_used": {"type": "boolean"},
+        "source_uri_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "final_uri_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "final_origin": {"type": ["string", "null"]}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool",
+        "tool_version",
+        "runtime",
+        "network",
+        "sandbox",
+        "resource_class",
+        "parameters",
+        "limits",
+        "dependencies",
+        "scanner_revision",
+        "queue_wait_ms",
+        "duration_ms"
+      ],
+      "properties": {
+        "tool": {"const": "media_evidence_analyze"},
+        "tool_version": {"type": "string"},
+        "runtime": {"type": "object"},
+        "network": {"const": "denied"},
+        "sandbox": {"enum": ["seccomp+landlock+uid+cgroupv2", "seccomp+landlock"]},
+        "resource_class": {"enum": ["cpu", "gpu"]},
+        "parameters": {"type": "object"},
+        "limits": {"type": "object"},
+        "dependencies": {"type": "object"},
+        "scanner_revision": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "file", "bytes", "mtime_ns", "sha256"],
+          "properties": {
+            "status": {"type": "string", "minLength": 1, "maxLength": 64},
+            "file": {"type": ["string", "null"], "maxLength": 64},
+            "bytes": {"type": ["integer", "null"], "minimum": 1},
+            "mtime_ns": {"type": ["integer", "null"], "minimum": 0},
+            "sha256": {
+              "anyOf": [
+                {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                {"type": "null"}
+              ]
+            }
+          }
+        },
+        "queue_wait_ms": {"type": "integer", "minimum": 0},
+        "duration_ms": {"type": "integer", "minimum": 0}
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "path", "sha256", "bytes", "media_type"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^artifact:sha256:[0-9a-f]{64}$"},
+          "kind": {"type": "string", "minLength": 1},
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "bytes": {"type": "integer", "minimum": 0},
+          "media_type": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "index_artifact_id", "kinds"],
+      "properties": {
+        "count": {"type": "integer", "minimum": 1},
+        "index_artifact_id": {"type": "string", "pattern": "^artifact:sha256:[0-9a-f]{64}$"},
+        "kinds": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tier", "warnings", "disagreements", "coverage"],
+      "properties": {
+        "tier": {"enum": ["complete", "partial", "insufficient"]},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "disagreements": {"type": "array", "items": {"type": "object"}},
+        "coverage": {"type": "object"}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content_trust", "instruction_handling", "cloud_egress", "purpose_sha256"],
+      "properties": {
+        "content_trust": {"const": "untrusted"},
+        "instruction_handling": {"const": "never_execute"},
+        "cloud_egress": {"const": "denied"},
+        "purpose_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "key_id", "payload_sha256", "signature"],
+      "properties": {
+        "algorithm": {"const": "hmac-sha256"},
+        "key_id": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+        "payload_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "signature": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}
