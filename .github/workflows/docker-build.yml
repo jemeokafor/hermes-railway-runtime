@@ -19,7 +19,7 @@ jobs:
         run: |
           python3 -m unittest discover -s test/p4 -p 'test_p4_harness.py'
           python3 -m py_compile test/p4/p4_image_certification.py test/p4/test_p4_harness.py
-          bash -n scripts/certify-p4-image.sh
+          bash -n scripts/build-candidate-image.sh scripts/certify-p4-image.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

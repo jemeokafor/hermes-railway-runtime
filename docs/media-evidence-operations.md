@@ -39,12 +39,10 @@ Acquisitions are serialized and admission preserves the larger of `MEDIA_EVIDENC
 
 ## Certifying A Candidate Image
 
-Build the final image with a real source revision, then certify that local image without starting the Hermes service:
+Build the final image with a real source revision, then certify that local image without starting the Hermes service. The local build wrapper retains a 7 GiB host-disk cushion, which exceeds the required 6 GB minimum, prunes only BuildKit cache, and cancels a build that approaches the floor.
 
 ```bash
-docker build \
-  --build-arg RAILWAY_GIT_COMMIT_SHA="$(git rev-parse HEAD)" \
-  --tag hermes-railway-runtime:candidate .
+scripts/build-candidate-image.sh
 npm run certify:p4 -- hermes-railway-runtime:candidate
 ```
 

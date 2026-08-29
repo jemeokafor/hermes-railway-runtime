@@ -346,7 +346,7 @@ PY
 
 WORKDIR /opt/hermes-agent
 RUN uv venv /opt/hermes-venv --python 3.11 \
-  && UV_PROJECT_ENVIRONMENT=/opt/hermes-venv uv sync \
+  && UV_NO_CACHE=1 UV_PROJECT_ENVIRONMENT=/opt/hermes-venv uv sync \
     --frozen \
     --no-dev \
     --extra all \
@@ -355,7 +355,8 @@ RUN uv venv /opt/hermes-venv --python 3.11 \
     --python /opt/hermes-venv/bin/python \
   && ln -sf /opt/hermes-venv/bin/hermes /usr/local/bin/hermes \
   && /opt/hermes-venv/bin/python -I -c "from media_evidence.broker import main as broker_main; from media_evidence.broker_client import BrokerClient; from media_evidence.contracts import validate_manifest_schema; from media_evidence.worker import main" \
-  && /opt/hermes-venv/bin/python -I -c "import faster_whisper, PIL, telegram"
+  && /opt/hermes-venv/bin/python -I -c "import faster_whisper, PIL, telegram" \
+  && rm -rf /opt/hermes-agent/.git
 
 RUN /opt/hermes-venv/bin/python -I - <<'PY'
 from importlib.metadata import version
@@ -370,12 +371,14 @@ if observed != expected:
     raise SystemExit(f"Locked runtime dependency mismatch: {observed!r}")
 PY
 
-RUN WHISPER_MODEL_REVISION="${WHISPER_MODEL_REVISION}" \
+RUN HF_HOME=/tmp/huggingface \
+    WHISPER_MODEL_REVISION="${WHISPER_MODEL_REVISION}" \
     WHISPER_MODEL_SHA256="${WHISPER_MODEL_SHA256}" \
     /opt/hermes-venv/bin/python - <<'PY'
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 
 from huggingface_hub import snapshot_download
@@ -407,6 +410,7 @@ if actual_model_sha256 != expected_model_sha256:
     + "\n",
     encoding="utf-8",
 )
+shutil.rmtree(Path(os.environ["HF_HOME"]), ignore_errors=True)
 PY
 
 RUN chown -R root:root /opt/media-models \
